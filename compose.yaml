@@ -1,0 +1,25 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/luxio
+      UPDATE_PUBLISH_TOKEN: ${UPDATE_PUBLISH_TOKEN:?Set a publication secret of at least 32 characters}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+  mongo:
+    image: mongo:8
+    volumes: ["mongo:/data/db"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  mongo:

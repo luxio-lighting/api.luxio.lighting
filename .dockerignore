@@ -1,0 +1,10 @@
+**/node_modules
+**/dist
+**/build
+**/DerivedData*
+.sdk
+.npm-cache
+.device
+.env
+**/.gradle
+**/*.log
