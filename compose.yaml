@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     ports: ["127.0.0.1:3000:3000"]
     environment:
-      MONGODB_URI: mongodb://mongo:27017/luxio
+      MONGO_URI: mongodb://mongo:27017/luxio
       UPDATE_PUBLISH_TOKEN: ${UPDATE_PUBLISH_TOKEN:?Set a publication secret of at least 32 characters}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
     depends_on:

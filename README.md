@@ -3,7 +3,7 @@
 ```sh
 npm ci
 npm run build
-MONGODB_URI=mongodb://127.0.0.1:27017/luxio UPDATE_PUBLISH_TOKEN=YOUR_SECRET npm start
+MONGO_URI=mongodb://127.0.0.1:27017/luxio UPDATE_PUBLISH_TOKEN=YOUR_SECRET npm start
 ```
 
 The Dockerfile builds from this repository alone. `compose.yaml` includes MongoDB for local development.

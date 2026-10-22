@@ -1,6 +1,6 @@
 import { MongoClient } from 'mongodb';
 import { createApp } from './app.js';
-const client = new MongoClient(process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/luxio');
+const client = new MongoClient(process.env.MONGO_URI ?? 'mongodb://127.0.0.1:27017/luxio');
 await client.connect();
 const app = await createApp(client.db(), {
   publishToken: process.env.UPDATE_PUBLISH_TOKEN ?? '',
