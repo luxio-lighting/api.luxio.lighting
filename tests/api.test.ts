@@ -49,23 +49,35 @@ test('signed discovery: identity, no replay, WAN isolation, freshness refresh an
     const expired = await announcement(); current = new Date(current.getTime() + 121000);
     assert.equal((await app.inject({ method: 'POST', url: '/announcements', remoteAddress: wan, payload: expired })).statusCode, 401);
 
-    const base = { chip: 'esp32s3', url: 'https://firmware.example/app.bin', sha256: 'a'.repeat(64), size: 1000, parts: [{ address: 65536, url: 'https://firmware.example/app.bin', sha256: 'a'.repeat(64) }] };
+    const base = { chip: 'esp32s3', target: 'esp32s3-recovery-v1', url: 'https://firmware.example/app.bin', sha256: 'a'.repeat(64), size: 1000, parts: [0, 0x8000, 0xe000, 0x10000, 0x130000].map(address => ({ address, url: `https://firmware.example/${address}.bin`, sha256: 'a'.repeat(64) })) };
     assert.equal((await app.inject({ method: 'POST', url: '/updates', payload: { ...base, build: 1 } })).statusCode, 401);
     for (const release of [{ build: 9, channel: 0 }, { build: 123, channel: 0 }, { build: 200, channel: 100 }, { build: 150, channel: 50 }])
       assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, ...release } })).statusCode, 201);
-    assert.equal((await app.inject('/updates?chip=esp32s3&build=12&channel=0')).json().build, 123);
-    assert.equal((await app.inject('/updates?chip=esp32s3&build=12&channel=50')).json().build, 150);
-    assert.equal((await app.inject('/updates?chip=esp32s3&build=12&channel=100')).json().build, 200);
-    assert.equal((await app.inject('/updates?chip=esp32s3&build=200&channel=100')).json(), null);
-    assert.equal((await app.inject('/updates?chip=esp32c3&build=0&channel=100')).json(), null);
-    assert.equal((await app.inject('/updates?chip=esp32s3&build=0&channel=101')).statusCode, 400);
+    assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=12&channel=0')).json().build, 123);
+    assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=12&channel=50')).json().build, 150);
+    assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=12&channel=100')).json().build, 200);
+    assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=200&channel=100')).json(), null);
+    assert.equal((await app.inject('/updates?chip=esp32c3&target=esp32c3-recovery-v1&build=0&channel=100')).json(), null);
+    assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=0&channel=101')).statusCode, 400);
     const release = await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, build: 201 } });
     assert.equal(release.json().channel, 100);
-    const recovery = await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, build: 201, channel: 0, target: 'esp32s3-recovery-v1' } });
-    assert.equal(recovery.statusCode, 201, 'Same build can exist for different flash layouts');
-    assert.equal((await app.inject('/updates?chip=esp32s3&build=0&channel=0')).json().build, 123, 'Legacy devices cannot see recovery firmware');
-    assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=0&channel=0')).json().build, 201);
+    assert.equal(release.statusCode, 201);
+    assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, build: 201, channel: 0 } })).statusCode, 409);
+    for (const target of [undefined, 'ab-v1', 'unknown', 'esp32c3-recovery-v1']) {
+      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, build: 202, target } })).statusCode, 400);
+      assert.equal((await app.inject(`/updates?chip=esp32s3&build=0&channel=100${target ? `&target=${target}` : ''}`)).statusCode, 400);
+    }
+    // Old database rows must never be offered, even if they have a higher build.
+    const { target: _target, ...untargeted } = base;
+    await db.collection('Update').insertMany([
+      { ...untargeted, build: 999, channel: 0 },
+      { ...base, target: 'ab-v1', build: 1000, channel: 0 },
+    ]);
+    assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=0&channel=0')).json().build, 123);
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=201&channel=100')).json(), null);
-    assert.equal((await app.inject('/updates?chip=esp32s3&target=unknown&build=0&channel=0')).statusCode, 400);
+    // A supported chip without a published recovery image has no update; no alternate layout fallback.
+    for (const chip of ['esp32', 'esp32c2', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32c61'])
+      assert.equal((await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=0&channel=100`)).json(), null);
+
   } finally { await app.close(); await client.close(); await mongo.stop(); }
 });

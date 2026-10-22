@@ -13,16 +13,16 @@ const announcementSchema = z.object({
   build: z.number().int().min(0).max(2147483647), channel: z.number().int().min(0).max(100),
   signature: z.string().min(80).max(128),
 }).strict();
-const targetSchema = z.enum(['ab-v1', 'esp32s3-recovery-v1']);
+const targetSchema = z.enum(chipSchema.options.map(chip => `${chip}-recovery-v1`));
 const updateSchema = z.object({
-  target: targetSchema.default('ab-v1'),
+  target: targetSchema,
   build: z.number().int().min(1).max(2147483647), channel: z.number().int().min(0).max(100).default(100),
   chip: chipSchema, url: z.url().refine(url => url.startsWith('https://'), 'HTTPS required'),
   sha256: z.string().regex(/^[a-f0-9]{64}$/), size: z.number().int().min(1).max(8 * 1024 * 1024),
-  // Browser flashing needs the bootloader, partition table and application, each at its own offset.
+  // USB installation includes the bootloader, partition table, boot selection, recovery loader and application.
   parts: z.array(z.object({ address: z.number().int().min(0).max(16 * 1024 * 1024),
     url: z.url().refine(url => url.startsWith('https://')), sha256: z.string().regex(/^[a-f0-9]{64}$/) })).min(1).max(8),
-}).strict();
+}).strict().refine(update => update.target === `${update.chip}-recovery-v1`, { path: ['target'], message: 'Recovery target must match the chip' });
 
 export async function createApp(db: Db, options: { publishToken: string; trustProxy?: string[]; now?: () => Date; logger?: boolean }) {
   if (options.publishToken.length < 32) throw new Error('UPDATE_PUBLISH_TOKEN must contain at least 32 characters');
@@ -94,10 +94,11 @@ export async function createApp(db: Db, options: { publishToken: string; trustPr
     return reply.code(201).send(update);
   });
   app.get('/updates', async (request, reply) => {
-    const query = z.object({ chip: chipSchema, target: targetSchema.default('ab-v1'), build: z.coerce.number().int().min(0).max(2147483647),
-      channel: z.coerce.number().int().min(0).max(100) }).parse(request.query);
+    const query = z.object({ chip: chipSchema, target: targetSchema, build: z.coerce.number().int().min(0).max(2147483647),
+      channel: z.coerce.number().int().min(0).max(100) })
+      .refine(query => query.target === `${query.chip}-recovery-v1`, { path: ['target'], message: 'Recovery target must match the chip' }).parse(request.query);
     reply.header('Cache-Control', 'no-store');
-    return await updates.findOne({ chip: query.chip, ...(query.target === 'ab-v1' ? { $or: [{ target: 'ab-v1' }, { target: { $exists: false } }] } : { target: query.target }), build: { $gt: query.build }, channel: { $lte: query.channel } },
+    return await updates.findOne({ chip: query.chip, target: query.target, build: { $gt: query.build }, channel: { $lte: query.channel } },
       { sort: { build: -1 }, projection: { _id: 0 } });
   });
   return app;
