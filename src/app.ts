@@ -2,7 +2,8 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { createHash, createPublicKey, randomBytes, timingSafeEqual, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import type { Db } from 'mongodb';
+import { isDeepStrictEqual } from 'node:util';
+import { Binary, type Db } from 'mongodb';
 import { z } from 'zod';
 import firmwareTargets from '../shared/firmware/targets.json' with { type: 'json' };
 
@@ -36,13 +37,16 @@ const updateSchema = z.object({
     context.addIssue({ code: 'custom', path: ['parts'], message: 'USB and OTA application must match' });
 });
 
-export async function createApp(db: Db, options: { publishToken: string; trustProxy?: string[]; now?: () => Date; logger?: boolean }) {
+export async function createApp(db: Db, options: { publishToken: string; publicUrl?: string; trustProxy?: string[]; now?: () => Date; logger?: boolean }) {
   if (options.publishToken.length < 32) throw new Error('UPDATE_PUBLISH_TOKEN must contain at least 32 characters');
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: 64 * 1024, trustProxy: options.trustProxy ?? false });
   await app.register(cors, { origin: '*' });
   const devices = db.collection('Device');
   const challenges = db.collection('Challenge');
   const updates = db.collection('Update');
+  const blobs = db.collection<{ _id: string; data: Binary; size: number; createdAt: Date }>('FirmwareBlob');
+  const publicUrl = (options.publicUrl ?? 'https://api.luxio.lighting').replace(/\/$/, '');
+  app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
   await devices.createIndex({ deviceId: 1 }, { unique: true });
   await devices.createIndex({ wan_ip: 1, updatedAt: -1 });
   await challenges.createIndex({ nonce: 1 }, { unique: true });
@@ -97,12 +101,55 @@ export async function createApp(db: Db, options: { publishToken: string; trustPr
     return devices.find({ wan_ip: request.ip.replace(/^::ffff:/, ''), updatedAt: { $gt: new Date(now().getTime() - 3_600_000) } },
       { projection: { _id: 0, deviceId: 1, name: 1, lan_ip: 1, build: 1, channel: 1, updatedAt: 1 } }).toArray();
   });
+  app.put('/firmware/:sha256', {
+    bodyLimit: 8 * 1024 * 1024,
+    onRequest: async (request, reply) => {
+      const actual = createHash('sha256').update(request.headers.authorization ?? '').digest();
+      const expected = createHash('sha256').update(`Bearer ${options.publishToken}`).digest();
+      if (!timingSafeEqual(actual, expected)) return reply.code(401).send({ error: 'Invalid publication token' });
+    },
+  }, async (request, reply) => {
+    const { sha256 } = z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/) }).parse(request.params);
+    if (!Buffer.isBuffer(request.body) || !request.body.length) return reply.code(400).send({ error: 'A nonempty binary firmware artifact is required' });
+    if (createHash('sha256').update(request.body).digest('hex') !== sha256) return reply.code(400).send({ error: 'Firmware checksum mismatch' });
+    // One bounded BSON binary per artifact; immutable hashes also deduplicate retries and shared parts.
+    const result = await blobs.updateOne({ _id: sha256 }, { $setOnInsert: { data: new Binary(request.body), size: request.body.length, createdAt: now() } }, { upsert: true });
+    return reply.code(result.upsertedCount ? 201 : 200).send({ sha256, size: request.body.length, url: `${publicUrl}/firmware/${sha256}` });
+  });
+  app.get('/firmware/:sha256', async (request, reply) => {
+    const { sha256 } = z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/) }).parse(request.params);
+    const blob = await blobs.findOne({ _id: sha256 });
+    if (!blob) return reply.code(404).send({ error: 'Firmware artifact not found' });
+    reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+    reply.header('ETag', `"${sha256}"`);
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('Content-Length', blob.size);
+    return reply.type('application/octet-stream').send(Buffer.from(blob.data.value()));
+  });
   app.post('/updates', async (request, reply) => {
     const actual = createHash('sha256').update(request.headers.authorization ?? '').digest();
     const expected = createHash('sha256').update(`Bearer ${options.publishToken}`).digest();
     if (!timingSafeEqual(actual, expected)) return reply.code(401).send({ error: 'Invalid publication token' });
     const update = updateSchema.parse(request.body);
     update.minimumFlashSize ??= firmwareTargets.find(target => target.chip === update.chip)!.minimumFlashSize;
+    const hardware = firmwareTargets.find(target => target.chip === update.chip)!;
+    for (const part of [...update.parts, { address: hardware.applicationAddress, url: update.url, sha256: update.sha256, size: update.size }]) {
+      if (!part.url.startsWith(`${publicUrl}/firmware/`)) continue;
+      if (part.url !== `${publicUrl}/firmware/${part.sha256}`) return reply.code(400).send({ error: 'Firmware URL must match its checksum' });
+      const blob = await blobs.findOne({ _id: part.sha256 });
+      if (!blob) return reply.code(400).send({ error: 'Upload all firmware artifacts before registering an update' });
+      const limits = new Map([[hardware.bootloaderAddress, 0x8000 - hardware.bootloaderAddress], [0x8000, 0x1000], [0xe000, 0x2000], [0x10000, hardware.recoverySize], [hardware.applicationAddress, hardware.applicationSize]]);
+      if (blob.size > limits.get(part.address)! || (part.size !== undefined && blob.size !== part.size)) return reply.code(400).send({ error: 'Stored firmware size does not match the manifest or partition' });
+      if ([hardware.bootloaderAddress, 0x10000, hardware.applicationAddress].includes(part.address)) {
+        const image = Buffer.from(blob.data.value());
+        if (image.length < 24 || image[0] !== 0xe9 || image.readUInt16LE(12) !== hardware.imageChipId) return reply.code(400).send({ error: 'Stored firmware image is for a different chip' });
+      }
+    }
+    const existing = await updates.findOne({ chip: update.chip, target: update.target, build: update.build }, { projection: { _id: 0, createdAt: 0 } });
+    if (existing) {
+      if (isDeepStrictEqual(existing, update)) return reply.send(update);
+      return reply.code(409).send({ error: 'A different release already uses this chip, target and build' });
+    }
     await updates.insertOne({ ...update, createdAt: now() });
     return reply.code(201).send(update);
   });

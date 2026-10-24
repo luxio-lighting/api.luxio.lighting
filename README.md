@@ -21,3 +21,11 @@ Run `npm run check` and `npm test` here. Tests use a temporary MongoDB process a
 One build number can be registered independently for each chip. POST /updates checks the exact five-part recovery layout, including chip-specific bootloader offsets, and requires the USB and OTA application hashes to match. Application size is limited to the capacity recorded for that target in the matrix. `minimumFlashSize` defaults to the target requirement when omitted (4 MB for ESP32/S3/C3; 8 MB for C5/C6); new manifests include it explicitly. Optional per-part `size` fields are checked against partition capacities. The publisher separately fetches and validates image chip IDs and checksums before registration; the API does not fetch remote artifacts.
 
 GET /updates keeps exact chip/target matching and channel filtering. Missing releases return null, never a binary for another ESP32 family. Builds with the same number across families do not collide. Existing S3 recovery records keep working without a database migration.
+
+## Firmware binary storage
+
+`PUT /firmware/<sha256>` accepts `application/octet-stream` with the same bearer `UPDATE_PUBLISH_TOKEN` as update registration. Authentication runs before reading the body. Each nonempty artifact is limited to 8 MiB and stored as BSON binary in `FirmwareBlob`, keyed by its verified SHA-256. Identical uploads are idempotent; existing bytes cannot be overwritten with different content. This stays below MongoDB's 16 MiB document limit without base64 overhead or GridFS.
+
+`GET /firmware/<sha256>` serves the exact binary publicly with Content-Length, CORS, an ETag and immutable caching. Download URLs default to `https://api.luxio.lighting`; set `PUBLIC_URL` when hosting this API elsewhere. No additional storage service or volume is required.
+
+Register an update only after uploading its five parts. For API-hosted URLs, registration verifies that each blob exists, matches its declared size and partition capacity, and carries the correct image chip ID where applicable. Metadata lookup never includes binary data. Retrying an identical registration returns 200; changing an existing chip/target/build returns 409. External HTTPS manifests remain supported. Orphaned uploads are harmless and are not offered to devices until registration succeeds.
