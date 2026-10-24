@@ -4,8 +4,9 @@ import { createHash, createPublicKey, randomBytes, timingSafeEqual, verify } fro
 import { isIP } from 'node:net';
 import type { Db } from 'mongodb';
 import { z } from 'zod';
+import firmwareTargets from '../shared/firmware/targets.json' with { type: 'json' };
 
-const chipSchema = z.enum(['esp32', 'esp32c2', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32c61', 'esp32s3']);
+const chipSchema = z.enum(firmwareTargets.map(target => target.chip));
 const announcementSchema = z.object({
   deviceId: z.string().regex(/^[a-f0-9]{64}$/),
   publicKey: z.string().min(100).max(512), nonce: z.string().regex(/^[a-f0-9]{64}$/),
@@ -18,11 +19,22 @@ const updateSchema = z.object({
   target: targetSchema,
   build: z.number().int().min(1).max(2147483647), channel: z.number().int().min(0).max(100).default(100),
   chip: chipSchema, url: z.url().refine(url => url.startsWith('https://'), 'HTTPS required'),
-  sha256: z.string().regex(/^[a-f0-9]{64}$/), size: z.number().int().min(1).max(8 * 1024 * 1024),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/), size: z.number().int().min(288).max(8 * 1024 * 1024),
+  minimumFlashSize: z.number().int().positive().optional(),
   // USB installation includes the bootloader, partition table, boot selection, recovery loader and application.
   parts: z.array(z.object({ address: z.number().int().min(0).max(16 * 1024 * 1024),
-    url: z.url().refine(url => url.startsWith('https://')), sha256: z.string().regex(/^[a-f0-9]{64}$/) })).min(1).max(8),
-}).strict().refine(update => update.target === `${update.chip}-recovery-v1`, { path: ['target'], message: 'Recovery target must match the chip' });
+    url: z.url().refine(url => url.startsWith('https://')), sha256: z.string().regex(/^[a-f0-9]{64}$/), size: z.number().int().positive().optional() })).length(5),
+}).strict().superRefine((update, context) => {
+  if (update.target !== `${update.chip}-recovery-v1`) context.addIssue({ code: 'custom', path: ['target'], message: 'Recovery target must match the chip' });
+  const target = firmwareTargets.find(target => target.chip === update.chip)!;
+  if (update.size > target.applicationSize || (update.minimumFlashSize !== undefined && update.minimumFlashSize !== target.minimumFlashSize)) context.addIssue({ code: 'custom', path: ['size'], message: 'Firmware size or flash requirement does not match the target' });
+  const limits = new Map([[target.bootloaderAddress, 0x8000 - target.bootloaderAddress], [0x8000, 0x1000], [0xe000, 0x2000], [0x10000, target.recoverySize], [target.applicationAddress, target.applicationSize]]);
+  if (new Set(update.parts.map(part => part.address)).size !== limits.size || update.parts.some(part => !limits.has(part.address) || (part.size !== undefined && part.size > limits.get(part.address)!)))
+    context.addIssue({ code: 'custom', path: ['parts'], message: 'Flash parts must match the chip and recovery layout' });
+  const app = update.parts.find(part => part.address === target.applicationAddress);
+  if (!app || app.sha256 !== update.sha256 || (app.size !== undefined && app.size !== update.size))
+    context.addIssue({ code: 'custom', path: ['parts'], message: 'USB and OTA application must match' });
+});
 
 export async function createApp(db: Db, options: { publishToken: string; trustProxy?: string[]; now?: () => Date; logger?: boolean }) {
   if (options.publishToken.length < 32) throw new Error('UPDATE_PUBLISH_TOKEN must contain at least 32 characters');
@@ -90,6 +102,7 @@ export async function createApp(db: Db, options: { publishToken: string; trustPr
     const expected = createHash('sha256').update(`Bearer ${options.publishToken}`).digest();
     if (!timingSafeEqual(actual, expected)) return reply.code(401).send({ error: 'Invalid publication token' });
     const update = updateSchema.parse(request.body);
+    update.minimumFlashSize ??= firmwareTargets.find(target => target.chip === update.chip)!.minimumFlashSize;
     await updates.insertOne({ ...update, createdAt: now() });
     return reply.code(201).send(update);
   });

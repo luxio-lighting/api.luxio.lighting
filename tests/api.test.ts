@@ -6,6 +6,7 @@ import { MongoClient } from 'mongodb';
 import { createApp } from '../src/app.js';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import targets from '../shared/firmware/targets.json' with { type: 'json' };
 
 process.env.MONGOMS_DOWNLOAD_DIR = resolve('.sdk/mongodb');
 await mkdir('.sdk/mongo-data', { recursive: true });
@@ -76,8 +77,35 @@ test('signed discovery: identity, no replay, WAN isolation, freshness refresh an
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=0&channel=0')).json().build, 123);
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=201&channel=100')).json(), null);
     // A supported chip without a published recovery image has no update; no alternate layout fallback.
-    for (const chip of ['esp32', 'esp32c2', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32c61'])
+    for (const chip of ['esp32', 'esp32c3', 'esp32c5', 'esp32c6'])
       assert.equal((await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=0&channel=100`)).json(), null);
+
+    // One release number can exist on every target; never serve another chip's binary.
+    for (const hardware of targets) {
+      const chip = hardware.chip;
+      const manifest = { ...base, chip, target: `${chip}-recovery-v1`, build: 300, channel: 0,
+        url: `https://firmware.example/${chip}/luxio.bin`,
+        parts: [hardware.bootloaderAddress, 0x8000, 0xe000, 0x10000, hardware.applicationAddress].map(address => ({ address, url: `https://firmware.example/${chip}/${address}.bin`, sha256: base.sha256 })) };
+      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: manifest })).statusCode, 201);
+      const selected = (await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=0&channel=0`)).json();
+      assert.equal(selected.chip, chip); assert.equal(selected.url, manifest.url); assert.equal(selected.minimumFlashSize, hardware.minimumFlashSize);
+      assert.equal(selected.parts[0].address, hardware.bootloaderAddress);
+      assert.equal((await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=300&channel=0`)).json(), null);
+      for (const invalid of [
+        { ...manifest, parts: manifest.parts.slice(1) },
+        { ...manifest, parts: [manifest.parts[1], ...manifest.parts.slice(1)] },
+        { ...manifest, parts: [{ ...manifest.parts[0], address: 0x3000 }, ...manifest.parts.slice(1)] },
+        { ...manifest, parts: [{ ...manifest.parts[0], size: 0x9000 }, ...manifest.parts.slice(1)] },
+        { ...manifest, sha256: 'b'.repeat(64) },
+        { ...manifest, size: hardware.applicationSize + 1 },
+        { ...manifest, minimumFlashSize: 2097152 },
+        { ...manifest, target: `${chip === 'esp32' ? 'esp32s3' : 'esp32'}-recovery-v1` },
+      ]) assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...invalid, build: 301 } })).statusCode, 400);
+    }
+    for (const chip of ['esp32c2', 'esp32c61', 'esp32s2', 'esp32h2', 'esp32p4']) {
+      assert.equal((await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=0&channel=0`)).statusCode, 400);
+      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, chip, target: `${chip}-recovery-v1`, build: 400 } })).statusCode, 400);
+    }
 
   } finally { await app.close(); await client.close(); await mongo.stop(); }
 });

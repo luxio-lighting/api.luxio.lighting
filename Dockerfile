@@ -4,6 +4,7 @@ COPY package*.json ./
 COPY tools/materialize-dependencies.mjs ./tools/
 RUN npm ci
 COPY src ./src
+COPY shared ./shared
 RUN npm run build && npm prune --omit=dev
 FROM node:24-alpine
 WORKDIR /app
