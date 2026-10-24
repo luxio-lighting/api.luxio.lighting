@@ -1,3 +1,4 @@
+import { otaPublicKey, signedRelease } from './signing.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
@@ -16,7 +17,7 @@ const db = client.db('luxio-tests');
 await db.dropDatabase();
 let current = new Date('2026-10-21T12:00:00Z');
 const token = 'test-only-publication-token-32-characters';
-const app = await createApp(db, { publishToken: token, now: () => current });
+const app = await createApp(db, { otaPublicKey, publishToken: token, now: () => current });
 const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const publicKey = keys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
 const deviceId = createHash('sha256').update(Buffer.from(publicKey, 'base64')).digest('hex');
@@ -51,21 +52,21 @@ test('signed discovery: identity, no replay, WAN isolation, freshness refresh an
     assert.equal((await app.inject({ method: 'POST', url: '/announcements', remoteAddress: wan, payload: expired })).statusCode, 401);
 
     const base = { chip: 'esp32s3', target: 'esp32s3-recovery-v1', url: 'https://firmware.example/app.bin', sha256: 'a'.repeat(64), size: 1000, parts: [0, 0x8000, 0xe000, 0x10000, 0x130000].map(address => ({ address, url: `https://firmware.example/${address}.bin`, sha256: 'a'.repeat(64) })) };
-    assert.equal((await app.inject({ method: 'POST', url: '/updates', payload: { ...base, build: 1 } })).statusCode, 401);
+    assert.equal((await app.inject({ method: 'POST', url: '/updates', payload: signedRelease({ ...base, build: 1 }) })).statusCode, 401);
     for (const release of [{ build: 9, channel: 0 }, { build: 123, channel: 0 }, { build: 200, channel: 100 }, { build: 150, channel: 50 }])
-      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, ...release } })).statusCode, 201);
+      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...base, ...release }) })).statusCode, 201);
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=12&channel=0')).json().build, 123);
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=12&channel=50')).json().build, 150);
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=12&channel=100')).json().build, 200);
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=200&channel=100')).json(), null);
     assert.equal((await app.inject('/updates?chip=esp32c3&target=esp32c3-recovery-v1&build=0&channel=100')).json(), null);
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=0&channel=101')).statusCode, 400);
-    const release = await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, build: 201 } });
+    const release = await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...base, build: 201 }) });
     assert.equal(release.json().channel, 100);
     assert.equal(release.statusCode, 201);
-    assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, build: 201, channel: 0 } })).statusCode, 409);
+    assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...base, build: 201, channel: 0 }) })).statusCode, 409);
     for (const target of [undefined, 'ab-v1', 'unknown', 'esp32c3-recovery-v1']) {
-      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, build: 202, target } })).statusCode, 400);
+      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...base, build: 202, target }) })).statusCode, 400);
       assert.equal((await app.inject(`/updates?chip=esp32s3&build=0&channel=100${target ? `&target=${target}` : ''}`)).statusCode, 400);
     }
     // Old database rows must never be offered, even if they have a higher build.
@@ -86,7 +87,7 @@ test('signed discovery: identity, no replay, WAN isolation, freshness refresh an
       const manifest = { ...base, chip, target: `${chip}-recovery-v1`, build: 300, channel: 0,
         url: `https://firmware.example/${chip}/luxio.bin`,
         parts: [hardware.bootloaderAddress, 0x8000, 0xe000, 0x10000, hardware.applicationAddress].map(address => ({ address, url: `https://firmware.example/${chip}/${address}.bin`, sha256: base.sha256 })) };
-      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: manifest })).statusCode, 201);
+      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease(manifest) })).statusCode, 201);
       const selected = (await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=0&channel=0`)).json();
       assert.equal(selected.chip, chip); assert.equal(selected.url, manifest.url); assert.equal(selected.minimumFlashSize, hardware.minimumFlashSize);
       assert.equal(selected.parts[0].address, hardware.bootloaderAddress);
@@ -100,11 +101,11 @@ test('signed discovery: identity, no replay, WAN isolation, freshness refresh an
         { ...manifest, size: hardware.applicationSize + 1 },
         { ...manifest, minimumFlashSize: 2097152 },
         { ...manifest, target: `${chip === 'esp32' ? 'esp32s3' : 'esp32'}-recovery-v1` },
-      ]) assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...invalid, build: 301 } })).statusCode, 400);
+      ]) assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...invalid, build: 301 }) })).statusCode, 400);
     }
     for (const chip of ['esp32c2', 'esp32c61', 'esp32s2', 'esp32h2', 'esp32p4']) {
       assert.equal((await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=0&channel=0`)).statusCode, 400);
-      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...base, chip, target: `${chip}-recovery-v1`, build: 400 } })).statusCode, 400);
+      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...base, chip, target: `${chip}-recovery-v1`, build: 400 }) })).statusCode, 400);
     }
 
   } finally { await app.close(); await client.close(); await mongo.stop(); }

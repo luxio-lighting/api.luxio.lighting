@@ -1,3 +1,4 @@
+import { otaPublicKey, signedRelease } from './signing.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -14,7 +15,7 @@ test('MongoDB firmware storage and publication across the chip matrix', async ()
   const db = client.db('firmware-tests');
   const token = 'test-firmware-publish-token-at-least-32';
   const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream' };
-  const app = await createApp(db, { publishToken: token });
+  const app = await createApp(db, { otaPublicKey, publishToken: token });
   try {
     const sample = Buffer.alloc(100000, 42);
     const digest = createHash('sha256').update(sample).digest('hex');
@@ -60,13 +61,23 @@ test('MongoDB firmware storage and publication across the chip matrix', async ()
         { ...manifest, parts: [{ ...parts[0], size: 33 }, ...parts.slice(1)] },
         { ...manifest, parts: [{ ...parts[0], sha256: parts[1].sha256, url: parts[1].url }, ...parts.slice(1)] },
       ]) {
-        const result = await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: invalid });
+        const result = await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease(invalid) });
         assert.equal(result.statusCode, 400, result.body);
       }
-      const published = await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: manifest });
+      const signed = signedRelease(manifest);
+      for (const changed of [
+        manifest, { ...signed, signatureVersion: 2 }, { ...signed, keyId: 'unknown' },
+        { ...signed, signature: 'A'.repeat(96) }, { ...signed, channel: 100 },
+        { ...signed, build: 25 }, { ...signed, size: manifest.size + 1 },
+        { ...signed, sha256: '0'.repeat(64) },
+      ]) {
+        const rejected = await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: changed });
+        assert.equal(rejected.statusCode, 400, rejected.body);
+      }
+      const published = await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease(manifest) });
       assert.equal(published.statusCode, 201, published.body);
-      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: manifest })).statusCode, 200);
-      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: { ...manifest, channel: 100 } })).statusCode, 409);
+      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease(manifest) })).statusCode, 200);
+      assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...manifest, channel: 100 }) })).statusCode, 409);
       const selected = (await app.inject(`/updates?chip=${hardware.chip}&target=${hardware.chip}-recovery-v1&build=0&channel=0`)).json();
       assert.equal(selected.build, 24);
       assert.equal(selected.chip, hardware.chip);

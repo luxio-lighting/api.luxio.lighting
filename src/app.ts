@@ -5,6 +5,7 @@ import { isIP } from 'node:net';
 import { isDeepStrictEqual } from 'node:util';
 import { Binary, type Db } from 'mongodb';
 import { z } from 'zod';
+import otaTrust from './ota-public-key.json' with { type: 'json' };
 import firmwareTargets from '../shared/firmware/targets.json' with { type: 'json' };
 
 const chipSchema = z.enum(firmwareTargets.map(target => target.chip));
@@ -17,6 +18,8 @@ const announcementSchema = z.object({
 }).strict();
 const targetSchema = z.enum(chipSchema.options.map(chip => `${chip}-recovery-v1`));
 const updateSchema = z.object({
+  signatureVersion: z.literal(1), keyId: z.string().regex(/^[a-z0-9-]{1,31}$/),
+  signature: z.string().regex(/^[A-Za-z0-9+/]{90,96}={0,2}$/).max(96),
   target: targetSchema,
   build: z.number().int().min(1).max(2147483647), channel: z.number().int().min(0).max(100).default(100),
   chip: chipSchema, url: z.url().refine(url => url.startsWith('https://'), 'HTTPS required'),
@@ -37,7 +40,7 @@ const updateSchema = z.object({
     context.addIssue({ code: 'custom', path: ['parts'], message: 'USB and OTA application must match' });
 });
 
-export async function createApp(db: Db, options: { publishToken: string; publicUrl?: string; trustProxy?: string[]; now?: () => Date; logger?: boolean }) {
+export async function createApp(db: Db, options: { publishToken: string; publicUrl?: string; trustProxy?: string[]; now?: () => Date; logger?: boolean; otaPublicKey?: { keyId: string; pem: string } }) {
   if (options.publishToken.length < 32) throw new Error('UPDATE_PUBLISH_TOKEN must contain at least 32 characters');
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: 64 * 1024, trustProxy: options.trustProxy ?? false });
   await app.register(cors, { origin: '*' });
@@ -131,6 +134,10 @@ export async function createApp(db: Db, options: { publishToken: string; publicU
     const expected = createHash('sha256').update(`Bearer ${options.publishToken}`).digest();
     if (!timingSafeEqual(actual, expected)) return reply.code(401).send({ error: 'Invalid publication token' });
     const update = updateSchema.parse(request.body);
+    const trust = options.otaPublicKey ?? otaTrust;
+    const canonical = `luxio-ota-v1\n${update.keyId}\n${update.chip}\n${update.target}\n${update.build}\n${update.channel}\n${update.size}\n${update.sha256}\n`;
+    if (update.keyId !== trust.keyId || !verify('sha256', Buffer.from(canonical), trust.pem, Buffer.from(update.signature, 'base64')))
+      return reply.code(400).send({ error: 'Invalid OTA release signature' });
     update.minimumFlashSize ??= firmwareTargets.find(target => target.chip === update.chip)!.minimumFlashSize;
     const hardware = firmwareTargets.find(target => target.chip === update.chip)!;
     for (const part of [...update.parts, { address: hardware.applicationAddress, url: update.url, sha256: update.sha256, size: update.size }]) {
@@ -147,7 +154,10 @@ export async function createApp(db: Db, options: { publishToken: string; publicU
     }
     const existing = await updates.findOne({ chip: update.chip, target: update.target, build: update.build }, { projection: { _id: 0, createdAt: 0 } });
     if (existing) {
-      if (isDeepStrictEqual(existing, update)) return reply.send(update);
+      // ECDSA signatures may differ across identical publication retries.
+      const { signature: _oldSignature, ...oldRelease } = existing;
+      const { signature: _newSignature, ...newRelease } = update;
+      if (isDeepStrictEqual(oldRelease, newRelease)) return reply.send(existing);
       return reply.code(409).send({ error: 'A different release already uses this chip, target and build' });
     }
     await updates.insertOne({ ...update, createdAt: now() });

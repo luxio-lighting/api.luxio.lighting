@@ -29,3 +29,24 @@ GET /updates keeps exact chip/target matching and channel filtering. Missing rel
 `GET /firmware/<sha256>` serves the exact binary publicly with Content-Length, CORS, an ETag and immutable caching. Download URLs default to `https://api.luxio.lighting`; set `PUBLIC_URL` when hosting this API elsewhere. No additional storage service or volume is required.
 
 Register an update only after uploading its five parts. For API-hosted URLs, registration verifies that each blob exists, matches its declared size and partition capacity, and carries the correct image chip ID where applicable. Metadata lookup never includes binary data. Retrying an identical registration returns 200; changing an existing chip/target/build returns 409. External HTTPS manifests remain supported. Orphaned uploads are harmless and are not offered to devices until registration succeeds.
+
+## Signed OTA over HTTP
+
+New publications require `signatureVersion: 1`, `keyId: "release-2026"` and a base64 DER ECDSA P-256/SHA-256 `signature`. The API verifies against `src/ota-public-key.json`, matching the public key embedded in main firmware and recovery. The private key exists only in the firmware publisher's `OTA_SIGNING_KEY` secret.
+
+The signed UTF-8 payload has LF separators, decimal integers and a final LF:
+
+```
+luxio-ota-v1
+<keyId>
+<chip>
+<target>
+<build>
+<channel>
+<size>
+<sha256>
+```
+
+Device announcements, update checks and firmware downloads use HTTP. The firmware constructs downloads from its compiled API origin plus `/firmware/<signed sha256>` and verifies the signature and streamed hash before selecting an application to boot. Discovery requests retain their challenge-based device signatures. HTTP does not conceal metadata or prevent a network attacker from suppressing updates.
+
+Keep `PUBLIC_URL` on HTTPS for browser Setup, blob uploads and publication. Serve device POST `/announcements/challenge`, POST `/announcements`, GET `/updates` and GET `/firmware/:sha256` over port 80 without redirects. Publishing clients continue to send the bearer token exclusively over HTTPS. Existing database releases remain readable for old clients; all new publications require signatures. Deploy this API before publishing build 31 or later. No database migration or new server-side secret is needed.
