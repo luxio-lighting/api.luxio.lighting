@@ -53,7 +53,7 @@ test('MongoDB firmware storage and publication across the chip matrix', async ()
         assert.ok([200, 201].includes(upload.statusCode), upload.body);
         parts.push({ address, sha256, size: bytes.length, url: upload.json().url });
       }
-      const manifest = { chip: hardware.chip, target: `${hardware.chip}-recovery-v1`, build: 24, channel: 0,
+      const manifest = { chip: hardware.chip, target: hardware.target, build: 24, channel: 0,
         minimumFlashSize: hardware.minimumFlashSize, size: parts[4].size, sha256: parts[4].sha256, url: parts[4].url, parts };
       for (const invalid of [
         { ...manifest, parts: [{ ...parts[0], sha256: 'f'.repeat(64), url: `https://api.luxio.lighting/firmware/${'f'.repeat(64)}` }, ...parts.slice(1)] },
@@ -78,7 +78,7 @@ test('MongoDB firmware storage and publication across the chip matrix', async ()
       assert.equal(published.statusCode, 201, published.body);
       assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease(manifest) })).statusCode, 200);
       assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...manifest, channel: 100 }) })).statusCode, 409);
-      const selected = (await app.inject(`/updates?chip=${hardware.chip}&target=${hardware.chip}-recovery-v1&build=0&channel=0`)).json();
+      const selected = (await app.inject(`/updates?chip=${hardware.chip}&target=${hardware.target}&build=0&channel=0`)).json();
       assert.equal(selected.build, 24);
       assert.equal(selected.chip, hardware.chip);
       assert.equal(selected.data, undefined);

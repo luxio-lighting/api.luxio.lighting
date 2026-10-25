@@ -16,7 +16,7 @@ const announcementSchema = z.object({
   build: z.number().int().min(0).max(2147483647), channel: z.number().int().min(0).max(100),
   signature: z.string().min(80).max(128),
 }).strict();
-const targetSchema = z.enum(chipSchema.options.map(chip => `${chip}-recovery-v1`));
+const targetSchema = z.enum(firmwareTargets.map(target => target.target));
 const updateSchema = z.object({
   signatureVersion: z.literal(1), keyId: z.string().regex(/^[a-z0-9-]{1,31}$/),
   signature: z.string().regex(/^[A-Za-z0-9+/]{90,96}={0,2}$/).max(96),
@@ -29,8 +29,8 @@ const updateSchema = z.object({
   parts: z.array(z.object({ address: z.number().int().min(0).max(16 * 1024 * 1024),
     url: z.url().refine(url => url.startsWith('https://')), sha256: z.string().regex(/^[a-f0-9]{64}$/), size: z.number().int().positive().optional() })).length(5),
 }).strict().superRefine((update, context) => {
-  if (update.target !== `${update.chip}-recovery-v1`) context.addIssue({ code: 'custom', path: ['target'], message: 'Recovery target must match the chip' });
-  const target = firmwareTargets.find(target => target.chip === update.chip)!;
+  const target = firmwareTargets.find(target => target.chip === update.chip && target.target === update.target);
+  if (!target) { context.addIssue({ code: 'custom', path: ['target'], message: 'Recovery target must match the chip and layout' }); return; }
   if (update.size > target.applicationSize || (update.minimumFlashSize !== undefined && update.minimumFlashSize !== target.minimumFlashSize)) context.addIssue({ code: 'custom', path: ['size'], message: 'Firmware size or flash requirement does not match the target' });
   const limits = new Map([[target.bootloaderAddress, 0x8000 - target.bootloaderAddress], [0x8000, 0x1000], [0xe000, 0x2000], [0x10000, target.recoverySize], [target.applicationAddress, target.applicationSize]]);
   if (new Set(update.parts.map(part => part.address)).size !== limits.size || update.parts.some(part => !limits.has(part.address) || (part.size !== undefined && part.size > limits.get(part.address)!)))
@@ -138,8 +138,8 @@ export async function createApp(db: Db, options: { publishToken: string; publicU
     const canonical = `luxio-ota-v1\n${update.keyId}\n${update.chip}\n${update.target}\n${update.build}\n${update.channel}\n${update.size}\n${update.sha256}\n`;
     if (update.keyId !== trust.keyId || !verify('sha256', Buffer.from(canonical), trust.pem, Buffer.from(update.signature, 'base64')))
       return reply.code(400).send({ error: 'Invalid OTA release signature' });
-    update.minimumFlashSize ??= firmwareTargets.find(target => target.chip === update.chip)!.minimumFlashSize;
-    const hardware = firmwareTargets.find(target => target.chip === update.chip)!;
+    update.minimumFlashSize ??= firmwareTargets.find(target => target.chip === update.chip && target.target === update.target)!.minimumFlashSize;
+    const hardware = firmwareTargets.find(target => target.chip === update.chip && target.target === update.target)!;
     for (const part of [...update.parts, { address: hardware.applicationAddress, url: update.url, sha256: update.sha256, size: update.size }]) {
       if (!part.url.startsWith(`${publicUrl}/firmware/`)) continue;
       if (part.url !== `${publicUrl}/firmware/${part.sha256}`) return reply.code(400).send({ error: 'Firmware URL must match its checksum' });
@@ -166,7 +166,7 @@ export async function createApp(db: Db, options: { publishToken: string; publicU
   app.get('/updates', async (request, reply) => {
     const query = z.object({ chip: chipSchema, target: targetSchema, build: z.coerce.number().int().min(0).max(2147483647),
       channel: z.coerce.number().int().min(0).max(100) })
-      .refine(query => query.target === `${query.chip}-recovery-v1`, { path: ['target'], message: 'Recovery target must match the chip' }).parse(request.query);
+      .refine(query => firmwareTargets.some(target => target.chip === query.chip && target.target === query.target), { path: ['target'], message: 'Recovery target must match the chip' }).parse(request.query);
     reply.header('Cache-Control', 'no-store');
     return await updates.findOne({ chip: query.chip, target: query.target, build: { $gt: query.build }, channel: { $lte: query.channel } },
       { sort: { build: -1 }, projection: { _id: 0 } });

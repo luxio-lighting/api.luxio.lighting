@@ -84,14 +84,14 @@ test('signed discovery: identity, no replay, WAN isolation, freshness refresh an
     // One release number can exist on every target; never serve another chip's binary.
     for (const hardware of targets) {
       const chip = hardware.chip;
-      const manifest = { ...base, chip, target: `${chip}-recovery-v1`, build: 300, channel: 0,
-        url: `https://firmware.example/${chip}/luxio.bin`,
-        parts: [hardware.bootloaderAddress, 0x8000, 0xe000, 0x10000, hardware.applicationAddress].map(address => ({ address, url: `https://firmware.example/${chip}/${address}.bin`, sha256: base.sha256 })) };
+      const manifest = { ...base, chip, target: hardware.target, build: 300, channel: 0,
+        url: `https://firmware.example/${hardware.id}/luxio.bin`,
+        parts: [hardware.bootloaderAddress, 0x8000, 0xe000, 0x10000, hardware.applicationAddress].map(address => ({ address, url: `https://firmware.example/${hardware.id}/${address}.bin`, sha256: base.sha256 })) };
       assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease(manifest) })).statusCode, 201);
-      const selected = (await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=0&channel=0`)).json();
+      const selected = (await app.inject(`/updates?chip=${chip}&target=${hardware.target}&build=0&channel=0`)).json();
       assert.equal(selected.chip, chip); assert.equal(selected.url, manifest.url); assert.equal(selected.minimumFlashSize, hardware.minimumFlashSize);
       assert.equal(selected.parts[0].address, hardware.bootloaderAddress);
-      assert.equal((await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=300&channel=0`)).json(), null);
+      assert.equal((await app.inject(`/updates?chip=${chip}&target=${hardware.target}&build=300&channel=0`)).json(), null);
       for (const invalid of [
         { ...manifest, parts: manifest.parts.slice(1) },
         { ...manifest, parts: [manifest.parts[1], ...manifest.parts.slice(1)] },
@@ -100,6 +100,7 @@ test('signed discovery: identity, no replay, WAN isolation, freshness refresh an
         { ...manifest, sha256: 'b'.repeat(64) },
         { ...manifest, size: hardware.applicationSize + 1 },
         { ...manifest, minimumFlashSize: 2097152 },
+        { ...manifest, minimumFlashSize: 8388608 },
         { ...manifest, target: `${chip === 'esp32' ? 'esp32s3' : 'esp32'}-recovery-v1` },
       ]) assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...invalid, build: 301 }) })).statusCode, 400);
     }
