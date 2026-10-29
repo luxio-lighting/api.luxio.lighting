@@ -78,7 +78,7 @@ test('signed discovery: identity, no replay, WAN isolation, freshness refresh an
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=0&channel=0')).json().build, 123);
     assert.equal((await app.inject('/updates?chip=esp32s3&target=esp32s3-recovery-v1&build=201&channel=100')).json(), null);
     // A supported chip without a published recovery image has no update; no alternate layout fallback.
-    for (const chip of ['esp32', 'esp32c3', 'esp32c5', 'esp32c6'])
+    for (const chip of ['esp32', 'esp32s31', 'esp32c3', 'esp32c5', 'esp32c6'])
       assert.equal((await app.inject(`/updates?chip=${chip}&target=${chip}-recovery-v1&build=0&channel=100`)).json(), null);
 
     // One release number can exist on every target; never serve another chip's binary.
@@ -100,7 +100,7 @@ test('signed discovery: identity, no replay, WAN isolation, freshness refresh an
         { ...manifest, sha256: 'b'.repeat(64) },
         { ...manifest, size: hardware.applicationSize + 1 },
         { ...manifest, minimumFlashSize: 2097152 },
-        { ...manifest, minimumFlashSize: 8388608 },
+        { ...manifest, minimumFlashSize: hardware.minimumFlashSize * 2 },
         { ...manifest, target: `${chip === 'esp32' ? 'esp32s3' : 'esp32'}-recovery-v1` },
       ]) assert.equal((await app.inject({ method: 'POST', url: '/updates', headers: { authorization: `Bearer ${token}` }, payload: signedRelease({ ...invalid, build: 301 }) })).statusCode, 400);
     }
